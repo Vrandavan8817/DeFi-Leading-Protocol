@@ -52,6 +52,24 @@ contract DeFiLendingProtocol is ReentrancyGuard, Ownable {
         emit Deposit(msg.sender, _amount);
     }
 
+    function withdraw(uint256 _amount) external nonReentrant {
+        require(_amount > 0, "Amount must be greater than 0");
+        _updateInterest(msg.sender);
+
+        UserAccount storage account = accounts[msg.sender];
+        require(account.deposited >= _amount, "Insufficient balance");
+
+        uint256 maxBorrowableAfterWithdraw = ((account.deposited - _amount) * COLLATERAL_FACTOR) / 100;
+        require(account.borrowed <= maxBorrowableAfterWithdraw, "Withdraw would breach collateral ratio");
+
+        account.deposited -= _amount;
+        totalDeposits -= _amount;
+
+        require(token.transfer(msg.sender, _amount), "Transfer failed");
+
+        emit Withdraw(msg.sender, _amount);
+    }
+
     function borrow(uint256 _amount) external nonReentrant {
         require(_amount > 0, "Amount must be greater than 0");
         _updateInterest(msg.sender);
@@ -81,6 +99,38 @@ contract DeFiLendingProtocol is ReentrancyGuard, Ownable {
         totalBorrows -= repayAmount;
 
         emit Repay(msg.sender, repayAmount);
+    }
+
+    function liquidate(address _borrower) external nonReentrant {
+        uint256 healthFactor = getHealthFactor(_borrower);
+        require(healthFactor < LIQUIDATION_THRESHOLD, "Health factor is sufficient");
+
+        UserAccount storage account = accounts[_borrower];
+        uint256 repayAmount = account.borrowed;
+
+        require(token.transferFrom(msg.sender, address(this), repayAmount), "Repay transfer failed");
+
+        account.borrowed = 0;
+        totalBorrows -= repayAmount;
+
+        uint256 seizedCollateral = account.deposited;
+        account.deposited = 0;
+        totalDeposits -= seizedCollateral;
+
+        require(token.transfer(msg.sender, seizedCollateral), "Collateral transfer failed");
+
+        emit Liquidate(msg.sender, _borrower, repayAmount);
+    }
+
+    function getAccountSummary(address _user) external view returns (
+        uint256 deposited,
+        uint256 borrowed,
+        uint256 healthFactor
+    ) {
+        UserAccount storage account = accounts[_user];
+        deposited = account.deposited;
+        borrowed = account.borrowed;
+        healthFactor = getHealthFactor(_user);
     }
 
     function _updateInterest(address _user) internal {
