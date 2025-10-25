@@ -1,21 +1,5 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.0;
-
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
-
-/**
- * @title DeFi Lending Protocol (Enhanced)
- * @dev Allows users to deposit assets, earn interest, borrow against collateral,
- * and claim interest. Includes admin controls and global interest tracking.
- */
-contract DeFiLendingProtocol is ReentrancyGuard, Ownable {
-    IERC20 public token;
-
-    uint256 public constant COLLATERAL_FACTOR = 75; // 75%
-    uint256 public constant LIQUIDATION_THRESHOLD = 85; // 85%
-    uint256 public constant INTEREST_RATE_BASE = 5; // 5% APR
+75%
+    uint256 public constant LIQUIDATION_THRESHOLD = 85; 5% APR
     bool public isPaused;
 
     struct UserAccount {
@@ -29,85 +13,7 @@ contract DeFiLendingProtocol is ReentrancyGuard, Ownable {
 
     uint256 public totalDeposits;
     uint256 public totalBorrows;
-    uint256 public protocolInterest; // Unclaimed interest
-    uint256 public lastGlobalInterestUpdate;
-
-    event Deposit(address indexed user, uint256 amount);
-    event Withdraw(address indexed user, uint256 amount);
-    event Borrow(address indexed user, uint256 amount);
-    event Repay(address indexed user, uint256 amount);
-    event Liquidate(address indexed liquidator, address indexed borrower, uint256 amount);
-    event InterestClaimed(address indexed user, uint256 amount);
-    event Paused();
-    event Unpaused();
-
-    modifier notPaused() {
-        require(!isPaused, "Protocol is paused");
-        _;
-    }
-
-    constructor(address _token) Ownable(msg.sender) {
-        require(_token != address(0), "Invalid token address");
-        token = IERC20(_token);
-        lastGlobalInterestUpdate = block.timestamp;
-    }
-
-    function deposit(uint256 _amount) external nonReentrant notPaused {
-        require(_amount > 0, "Amount must be greater than 0");
-        _updateInterest(msg.sender);
-        require(token.transferFrom(msg.sender, address(this), _amount), "Transfer failed");
-
-        accounts[msg.sender].deposited += _amount;
-        totalDeposits += _amount;
-
-        emit Deposit(msg.sender, _amount);
-    }
-
-    function withdraw(uint256 _amount) external nonReentrant notPaused {
-        require(_amount > 0, "Amount must be greater than 0");
-        _updateInterest(msg.sender);
-
-        UserAccount storage account = accounts[msg.sender];
-        require(account.deposited >= _amount, "Insufficient balance");
-
-        uint256 maxBorrowableAfterWithdraw = ((account.deposited - _amount) * COLLATERAL_FACTOR) / 100;
-        require(account.borrowed <= maxBorrowableAfterWithdraw, "Withdraw would breach collateral ratio");
-
-        account.deposited -= _amount;
-        totalDeposits -= _amount;
-
-        require(token.transfer(msg.sender, _amount), "Transfer failed");
-
-        emit Withdraw(msg.sender, _amount);
-    }
-
-    function borrow(uint256 _amount) external nonReentrant notPaused {
-        require(_amount > 0, "Amount must be greater than 0");
-        _updateInterest(msg.sender);
-
-        UserAccount storage account = accounts[msg.sender];
-        uint256 maxBorrowable = (account.deposited * COLLATERAL_FACTOR) / 100;
-        require(account.borrowed + _amount <= maxBorrowable, "Insufficient collateral");
-
-        account.borrowed += _amount;
-        totalBorrows += _amount;
-
-        require(token.transfer(msg.sender, _amount), "Transfer failed");
-
-        emit Borrow(msg.sender, _amount);
-    }
-
-    function repay(uint256 _amount) external nonReentrant notPaused {
-        require(_amount > 0, "Amount must be greater than 0");
-        _updateInterest(msg.sender);
-
-        UserAccount storage account = accounts[msg.sender];
-        require(account.borrowed > 0, "No outstanding loans");
-
-        uint256 repayAmount = _amount > account.borrowed ? account.borrowed : _amount;
-        require(token.transferFrom(msg.sender, address(this), repayAmount), "Transfer failed");
-
-        // Distribute interest proportionally to depositors
+    uint256 public protocolInterest; Distribute interest proportionally to depositors
         uint256 interestShare = (repayAmount * totalDeposits) / (totalDeposits + totalBorrows);
         protocolInterest += interestShare;
 
@@ -130,8 +36,7 @@ contract DeFiLendingProtocol is ReentrancyGuard, Ownable {
 
     function accrueInterestGlobal() external {
         for (uint256 i = 0; i < 10; i++) {
-            // Placeholder: in real scenario, use an iterable mapping or external indexer
-            // to loop over all depositors. Solidity does not support looping through mappings.
+            to loop over all depositors. Solidity does not support looping through mappings.
             break;
         }
 
@@ -190,17 +95,7 @@ contract DeFiLendingProtocol is ReentrancyGuard, Ownable {
             }
         }
 
-        // Optional: simulate some interest gain for depositors
-        if (account.deposited > 0 && protocolInterest > 0) {
-            uint256 share = (account.deposited * protocolInterest) / totalDeposits;
-            account.interestEarned += share;
-            protocolInterest -= share;
-        }
-
-        account.lastInterestCalcTime = block.timestamp;
-    }
-
-    // Admin-only emergency controls
+        Admin-only emergency controls
     function pause() external onlyOwner {
         isPaused = true;
         emit Paused();
@@ -211,6 +106,7 @@ contract DeFiLendingProtocol is ReentrancyGuard, Ownable {
         emit Unpaused();
     }
 }
-// START
-Updated on 2025-10-24
-// END
+END
+// 
+update
+// 
