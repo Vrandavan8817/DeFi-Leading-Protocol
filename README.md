@@ -1,4 +1,6 @@
 DeFi Lending Protocol
+
+
 Project Description
 A decentralized finance (DeFi) lending protocol that allows users to deposit assets to earn interest or borrow assets by providing collateral. The protocol automatically manages interest rates based on supply and demand, and includes a liquidation mechanism for undercollateralized loans to ensure system solvency.
 
