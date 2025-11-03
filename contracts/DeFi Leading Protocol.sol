@@ -1,112 +1,140 @@
-75%
-    uint256 public constant LIQUIDATION_THRESHOLD = 85; 5% APR
-    bool public isPaused;
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
 
-    struct UserAccount {
-        uint256 deposited;
-        uint256 borrowed;
-        uint256 lastInterestCalcTime;
-        uint256 interestEarned;
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+
+/**
+ * @title DeFiLeadingProtocolToken
+ * @dev ERC20 token with governance voting capabilities
+ */
+contract DeFiLeadingProtocolToken is ERC20, Ownable {
+    // A record of each accounts delegate
+    mapping(address => address) private _delegates;
+
+    // A checkpoint for marking number of votes from a given block
+    struct Checkpoint {
+        uint32 fromBlock;
+        uint256 votes;
     }
 
-    mapping(address => UserAccount) public accounts;
+    // A record of votes checkpoints for each account, by index
+    mapping(address => mapping(uint32 => Checkpoint)) public checkpoints;
 
-    uint256 public totalDeposits;
-    uint256 public totalBorrows;
-    uint256 public protocolInterest; Distribute interest proportionally to depositors
-        uint256 interestShare = (repayAmount * totalDeposits) / (totalDeposits + totalBorrows);
-        protocolInterest += interestShare;
+    // The number of checkpoints for each account
+    mapping(address => uint32) public numCheckpoints;
 
-        account.borrowed -= repayAmount;
-        totalBorrows -= repayAmount;
+    // Events
+    event DelegateChanged(address indexed delegator, address indexed fromDelegate, address indexed toDelegate);
+    event DelegateVotesChanged(address indexed delegate, uint256 previousBalance, uint256 newBalance);
 
-        emit Repay(msg.sender, repayAmount);
+    constructor(uint256 initialSupply) ERC20("DeFi Leading Protocol", "DLP") {
+        _mint(msg.sender, initialSupply);
     }
 
-    function claimInterest() external nonReentrant {
-        UserAccount storage account = accounts[msg.sender];
-        require(account.interestEarned > 0, "No interest to claim");
-
-        uint256 amount = account.interestEarned;
-        account.interestEarned = 0;
-
-        require(token.transfer(msg.sender, amount), "Transfer failed");
-        emit InterestClaimed(msg.sender, amount);
+    /**
+     * @dev Mint tokens to address (owner only)
+     */
+    function mint(address to, uint256 amount) public onlyOwner {
+        _mint(to, amount);
+        _moveDelegates(address(0), _delegates[to], amount);
     }
 
-    function accrueInterestGlobal() external {
-        for (uint256 i = 0; i < 10; i++) {
-            to loop over all depositors. Solidity does not support looping through mappings.
-            break;
-        }
-
-        lastGlobalInterestUpdate = block.timestamp;
+    /**
+     * @dev Burn tokens from address (owner only)
+     */
+    function burn(address from, uint256 amount) public onlyOwner {
+        _burn(from, amount);
+        _moveDelegates(_delegates[from], address(0), amount);
     }
 
-    function liquidate(address _borrower) external nonReentrant notPaused {
-        uint256 healthFactor = getHealthFactor(_borrower);
-        require(healthFactor < LIQUIDATION_THRESHOLD, "Health factor is sufficient");
+    /**
+     * @dev Override _transfer to move delegates
+     */
+    function _transfer(address sender, address recipient, uint256 amount) internal override {
+        super._transfer(sender, recipient, amount);
 
-        UserAccount storage account = accounts[_borrower];
-        uint256 repayAmount = account.borrowed;
-
-        require(token.transferFrom(msg.sender, address(this), repayAmount), "Repay transfer failed");
-
-        account.borrowed = 0;
-        totalBorrows -= repayAmount;
-
-        uint256 seizedCollateral = account.deposited;
-        account.deposited = 0;
-        totalDeposits -= seizedCollateral;
-
-        require(token.transfer(msg.sender, seizedCollateral), "Collateral transfer failed");
-
-        emit Liquidate(msg.sender, _borrower, repayAmount);
+        _moveDelegates(_delegates[sender], _delegates[recipient], amount);
     }
 
-    function getAccountSummary(address _user) external view returns (
-        uint256 deposited,
-        uint256 borrowed,
-        uint256 interestEarned,
-        uint256 healthFactor
-    ) {
-        UserAccount storage account = accounts[_user];
-        deposited = account.deposited;
-        borrowed = account.borrowed;
-        interestEarned = account.interestEarned;
-        healthFactor = getHealthFactor(_user);
+    /**
+     * @dev Delegate votes from msg.sender to delegatee
+     */
+    function delegate(address delegatee) external {
+        _delegate(msg.sender, delegatee);
     }
 
-    function getHealthFactor(address _user) public view returns (uint256) {
-        UserAccount storage account = accounts[_user];
-        if (account.borrowed == 0) return type(uint256).max;
-        return (account.deposited * 100) / account.borrowed;
+    /**
+     * @dev Returns delegatee for an account
+     */
+    function delegates(address account) external view returns (address) {
+        return _delegates[account];
     }
 
-    function _updateInterest(address _user) internal {
-        UserAccount storage account = accounts[_user];
+    /**
+     * @dev Get the current votes balance for an account
+     */
+    function getCurrentVotes(address account) external view returns (uint256) {
+        uint32 nCheckpoints = numCheckpoints[account];
+        return nCheckpoints > 0 ? checkpoints[account][nCheckpoints - 1].votes : 0;
+    }
 
-        if (account.borrowed > 0) {
-            uint256 timeElapsed = block.timestamp - account.lastInterestCalcTime;
-            if (timeElapsed > 0) {
-                uint256 interest = (account.borrowed * INTEREST_RATE_BASE * timeElapsed) / (100 * 365 days);
-                account.borrowed += interest;
-                totalBorrows += interest;
+    /**
+     * @dev Internal function to delegate votes
+     */
+    function _delegate(address delegator, address delegatee) internal {
+        address currentDelegate = _delegates[delegator];
+        uint256 delegatorBalance = balanceOf(delegator);
+
+        _delegates[delegator] = delegatee;
+
+        emit DelegateChanged(delegator, currentDelegate, delegatee);
+
+        _moveDelegates(currentDelegate, delegatee, delegatorBalance);
+    }
+
+    /**
+     * @dev Internal function to move delegates' votes
+     */
+    function _moveDelegates(address srcRep, address dstRep, uint256 amount) internal {
+        if (srcRep != dstRep && amount > 0) {
+            if (srcRep != address(0)) {
+                uint32 srcRepNum = numCheckpoints[srcRep];
+                uint256 srcRepOld = srcRepNum > 0 ? checkpoints[srcRep][srcRepNum - 1].votes : 0;
+                uint256 srcRepNew = srcRepOld - amount;
+                _writeCheckpoint(srcRep, srcRepNum, srcRepOld, srcRepNew);
+            }
+
+            if (dstRep != address(0)) {
+                uint32 dstRepNum = numCheckpoints[dstRep];
+                uint256 dstRepOld = dstRepNum > 0 ? checkpoints[dstRep][dstRepNum - 1].votes : 0;
+                uint256 dstRepNew = dstRepOld + amount;
+                _writeCheckpoint(dstRep, dstRepNum, dstRepOld, dstRepNew);
             }
         }
-
-        Admin-only emergency controls
-    function pause() external onlyOwner {
-        isPaused = true;
-        emit Paused();
     }
 
-    function unpause() external onlyOwner {
-        isPaused = false;
-        emit Unpaused();
+    /**
+     * @dev Internal function to write a checkpoint for delegate votes
+     */
+    function _writeCheckpoint(address delegatee, uint32 nCheckpoints, uint256 oldVotes, uint256 newVotes) internal {
+        uint32 blockNumber = safe32(block.number, "Block number exceeds 32 bits");
+
+        if (nCheckpoints > 0 && checkpoints[delegatee][nCheckpoints - 1].fromBlock == blockNumber) {
+            checkpoints[delegatee][nCheckpoints - 1].votes = newVotes;
+        } else {
+            checkpoints[delegatee][nCheckpoints] = Checkpoint(blockNumber, newVotes);
+            numCheckpoints[delegatee] = nCheckpoints + 1;
+        }
+
+        emit DelegateVotesChanged(delegatee, oldVotes, newVotes);
+    }
+
+    /**
+     * @dev Safely cast uint256 to uint32
+     */
+    function safe32(uint256 n, string memory errorMessage) internal pure returns (uint32) {
+        require(n < 2**32, errorMessage);
+        return uint32(n);
     }
 }
-END
-// 
-update
-// 
