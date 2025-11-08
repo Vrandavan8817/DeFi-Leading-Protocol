@@ -1,30 +1,10 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.0;
-
-import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
-
-/**
- * @title DeFiLeadingProtocolToken
- * @dev ERC20 token with governance voting capabilities
- */
-contract DeFiLeadingProtocolToken is ERC20, Ownable {
-    // A record of each accounts delegate
+A record of each accounts delegate
     mapping(address => address) private _delegates;
 
-    // A checkpoint for marking number of votes from a given block
-    struct Checkpoint {
-        uint32 fromBlock;
-        uint256 votes;
-    }
-
-    // A record of votes checkpoints for each account, by index
+    A record of votes checkpoints for each account, by index
     mapping(address => mapping(uint32 => Checkpoint)) public checkpoints;
 
-    // The number of checkpoints for each account
-    mapping(address => uint32) public numCheckpoints;
-
-    // Events
+    Events
     event DelegateChanged(address indexed delegator, address indexed fromDelegate, address indexed toDelegate);
     event DelegateVotesChanged(address indexed delegate, uint256 previousBalance, uint256 newBalance);
 
@@ -138,3 +118,6 @@ contract DeFiLeadingProtocolToken is ERC20, Ownable {
         return uint32(n);
     }
 }
+// 
+End
+// 
