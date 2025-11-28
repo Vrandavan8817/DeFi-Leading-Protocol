@@ -1,123 +1,184 @@
-A record of each accounts delegate
-    mapping(address => address) private _delegates;
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
 
-    A record of votes checkpoints for each account, by index
-    mapping(address => mapping(uint32 => Checkpoint)) public checkpoints;
+/**
+ * @title DeFiLendingProtocol
+ * @dev Minimal over‑collateralized ETH lending protocol with a single ERC20 debt asset (IOU-style)
+ * @notice Users deposit ETH as collateral and borrow synthetic tokens up to a collateral ratio
+ */
+interface IERC20 {
+    function mint(address to, uint256 amount) external;
+    function burnFrom(address account, uint256 amount) external;
+    function balanceOf(address account) external view returns (uint256);
+}
 
-    Events
-    event DelegateChanged(address indexed delegator, address indexed fromDelegate, address indexed toDelegate);
-    event DelegateVotesChanged(address indexed delegate, uint256 previousBalance, uint256 newBalance);
+contract DeFiLendingProtocol {
+    address public owner;
+    IERC20 public debtToken;          // synthetic debt token
+    uint256 public collateralRatioBP; // e.g. 15000 = 150% collateral
+    uint256 public liquidationRatioBP;// e.g. 12000 = 120% collateral
 
-    constructor(uint256 initialSupply) ERC20("DeFi Leading Protocol", "DLP") {
-        _mint(msg.sender, initialSupply);
+    // user => collateral in ETH (wei)
+    mapping(address => uint256) public collateralOf;
+
+    // user => debt (in debtToken units)
+    mapping(address => uint256) public debtOf;
+
+    event CollateralDeposited(address indexed user, uint256 amount);
+    event CollateralWithdrawn(address indexed user, uint256 amount);
+    event Borrowed(address indexed user, uint256 amount);
+    event Repaid(address indexed user, uint256 amount);
+    event Liquidated(address indexed user, address indexed liquidator, uint256 repaidDebt, uint256 collateralTaken);
+
+    event ParamsUpdated(uint256 collateralRatioBP, uint256 liquidationRatioBP);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Only owner");
+        _;
+    }
+
+    constructor(
+        address _debtToken,
+        uint256 _collateralRatioBP,
+        uint256 _liquidationRatioBP
+    ) {
+        require(_debtToken != address(0), "Zero debt token");
+        require(_collateralRatioBP > _liquidationRatioBP, "Collateral ratio > liquidation");
+        owner = msg.sender;
+        debtToken = IERC20(_debtToken);
+        collateralRatioBP = _collateralRatioBP;
+        liquidationRatioBP = _liquidationRatioBP;
     }
 
     /**
-     * @dev Mint tokens to address (owner only)
+     * @dev Deposit ETH as collateral
      */
-    function mint(address to, uint256 amount) public onlyOwner {
-        _mint(to, amount);
-        _moveDelegates(address(0), _delegates[to], amount);
+    function depositCollateral() external payable {
+        require(msg.value > 0, "Amount = 0");
+        collateralOf[msg.sender] += msg.value;
+        emit CollateralDeposited(msg.sender, msg.value);
     }
 
     /**
-     * @dev Burn tokens from address (owner only)
+     * @dev Withdraw collateral if user remains safely collateralized
      */
-    function burn(address from, uint256 amount) public onlyOwner {
-        _burn(from, amount);
-        _moveDelegates(_delegates[from], address(0), amount);
+    function withdrawCollateral(uint256 amount) external {
+        require(amount > 0, "Amount = 0");
+        uint256 current = collateralOf[msg.sender];
+        require(current >= amount, "Insufficient collateral");
+
+        uint256 newCollateral = current - amount;
+        require(_isSafe(newCollateral, debtOf[msg.sender], collateralRatioBP), "Would be under‑collateralized");
+
+        collateralOf[msg.sender] = newCollateral;
+
+        (bool ok, ) = payable(msg.sender).call{value: amount}("");
+        require(ok, "Transfer failed");
+
+        emit CollateralWithdrawn(msg.sender, amount);
     }
 
     /**
-     * @dev Override _transfer to move delegates
+     * @dev Borrow debt tokens against ETH collateral
+     * @param amount Amount of debt tokens to mint
      */
-    function _transfer(address sender, address recipient, uint256 amount) internal override {
-        super._transfer(sender, recipient, amount);
+    function borrow(uint256 amount) external {
+        require(amount > 0, "Amount = 0");
+        require(collateralOf[msg.sender] > 0, "No collateral");
 
-        _moveDelegates(_delegates[sender], _delegates[recipient], amount);
+        uint256 newDebt = debtOf[msg.sender] + amount;
+        require(_isSafe(collateralOf[msg.sender], newDebt, collateralRatioBP), "Insufficient collateral");
+
+        debtOf[msg.sender] = newDebt;
+        debtToken.mint(msg.sender, amount);
+
+        emit Borrowed(msg.sender, amount);
     }
 
     /**
-     * @dev Delegate votes from msg.sender to delegatee
+     * @dev Repay debt and free up collateral headroom
+     * @param amount Amount of debt tokens to burn
      */
-    function delegate(address delegatee) external {
-        _delegate(msg.sender, delegatee);
+    function repay(uint256 amount) external {
+        require(amount > 0, "Amount = 0");
+        uint256 currentDebt = debtOf[msg.sender];
+        require(currentDebt >= amount, "Repay > debt");
+
+        debtOf[msg.sender] = currentDebt - amount;
+        debtToken.burnFrom(msg.sender, amount);
+
+        emit Repaid(msg.sender, amount);
     }
 
     /**
-     * @dev Returns delegatee for an account
+     * @dev Anyone can liquidate an under‑collateralized position by repaying debt and seizing collateral
+     * @param user User to liquidate
+     * @param repayAmount Amount of debt to repay on behalf of user
      */
-    function delegates(address account) external view returns (address) {
-        return _delegates[account];
-    }
+    function liquidate(address user, uint256 repayAmount) external {
+        require(repayAmount > 0, "Amount = 0");
+        uint256 userDebt = debtOf[user];
+        require(userDebt >= repayAmount, "Too much repay");
 
-    /**
-     * @dev Get the current votes balance for an account
-     */
-    function getCurrentVotes(address account) external view returns (uint256) {
-        uint32 nCheckpoints = numCheckpoints[account];
-        return nCheckpoints > 0 ? checkpoints[account][nCheckpoints - 1].votes : 0;
-    }
+        uint256 col = collateralOf[user];
+        require(!_isSafe(col, userDebt, liquidationRatioBP), "Not liquidatable");
 
-    /**
-     * @dev Internal function to delegate votes
-     */
-    function _delegate(address delegator, address delegatee) internal {
-        address currentDelegate = _delegates[delegator];
-        uint256 delegatorBalance = balanceOf(delegator);
+        // liquidator must hold enough debt tokens; they are burned
+        debtToken.burnFrom(msg.sender, repayAmount);
+        debtOf[user] = userDebt - repayAmount;
 
-        _delegates[delegator] = delegatee;
-
-        emit DelegateChanged(delegator, currentDelegate, delegatee);
-
-        _moveDelegates(currentDelegate, delegatee, delegatorBalance);
-    }
-
-    /**
-     * @dev Internal function to move delegates' votes
-     */
-    function _moveDelegates(address srcRep, address dstRep, uint256 amount) internal {
-        if (srcRep != dstRep && amount > 0) {
-            if (srcRep != address(0)) {
-                uint32 srcRepNum = numCheckpoints[srcRep];
-                uint256 srcRepOld = srcRepNum > 0 ? checkpoints[srcRep][srcRepNum - 1].votes : 0;
-                uint256 srcRepNew = srcRepOld - amount;
-                _writeCheckpoint(srcRep, srcRepNum, srcRepOld, srcRepNew);
-            }
-
-            if (dstRep != address(0)) {
-                uint32 dstRepNum = numCheckpoints[dstRep];
-                uint256 dstRepOld = dstRepNum > 0 ? checkpoints[dstRep][dstRepNum - 1].votes : 0;
-                uint256 dstRepNew = dstRepOld + amount;
-                _writeCheckpoint(dstRep, dstRepNum, dstRepOld, dstRepNew);
-            }
+        // simple rule: liquidator gets collateral equal to repaidAmount (1:1) capped by user's collateral
+        uint256 collateralToTake = repayAmount;
+        if (collateralToTake > col) {
+            collateralToTake = col;
         }
+
+        collateralOf[user] = col - collateralToTake;
+
+        (bool ok, ) = payable(msg.sender).call{value: collateralToTake}("");
+        require(ok, "Collateral transfer failed");
+
+        emit Liquidated(user, msg.sender, repayAmount, collateralToTake);
     }
 
     /**
-     * @dev Internal function to write a checkpoint for delegate votes
+     * @dev Check if position meets given collateral ratio
      */
-    function _writeCheckpoint(address delegatee, uint32 nCheckpoints, uint256 oldVotes, uint256 newVotes) internal {
-        uint32 blockNumber = safe32(block.number, "Block number exceeds 32 bits");
-
-        if (nCheckpoints > 0 && checkpoints[delegatee][nCheckpoints - 1].fromBlock == blockNumber) {
-            checkpoints[delegatee][nCheckpoints - 1].votes = newVotes;
-        } else {
-            checkpoints[delegatee][nCheckpoints] = Checkpoint(blockNumber, newVotes);
-            numCheckpoints[delegatee] = nCheckpoints + 1;
-        }
-
-        emit DelegateVotesChanged(delegatee, oldVotes, newVotes);
+    function _isSafe(
+        uint256 collateral,
+        uint256 debt,
+        uint256 ratioBP
+    ) internal pure returns (bool) {
+        if (debt == 0) return true;
+        // collateral * 10000 >= debt * ratioBP
+        return collateral * 10000 >= debt * ratioBP;
     }
 
     /**
-     * @dev Safely cast uint256 to uint32
+     * @dev Owner can update risk parameters
      */
-    function safe32(uint256 n, string memory errorMessage) internal pure returns (uint32) {
-        require(n < 2**32, errorMessage);
-        return uint32(n);
+    function updateParams(uint256 _collateralRatioBP, uint256 _liquidationRatioBP) external onlyOwner {
+        require(_collateralRatioBP > _liquidationRatioBP, "Collateral ratio > liquidation");
+        collateralRatioBP = _collateralRatioBP;
+        liquidationRatioBP = _liquidationRatioBP;
+        emit ParamsUpdated(_collateralRatioBP, _liquidationRatioBP);
+    }
+
+    /**
+     * @dev View: total collateral held by protocol
+     */
+    function getTotalCollateral() external view returns (uint256) {
+        return address(this).balance;
+    }
+
+    /**
+     * @dev Transfer ownership
+     */
+    function transferOwnership(address newOwner) external onlyOwner {
+        require(newOwner != address(0), "Zero address");
+        address prev = owner;
+        owner = newOwner;
+        emit OwnershipTransferred(prev, newOwner);
     }
 }
-// 
-End
-// 
